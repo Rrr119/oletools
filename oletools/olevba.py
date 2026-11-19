@@ -338,6 +338,7 @@ import olefile
 from oletools.thirdparty.tablestream import tablestream
 from oletools.thirdparty.xglob import xglob, PathNotFoundException
 from oletools.thirdparty.oledump.plugin_biff import cBIFF
+from oletools import xlm_parser
 from oletools import ppt_parser
 from oletools import oleform
 from oletools import rtfobj
@@ -2717,6 +2718,8 @@ class VBA_Parser(object):
         self.ole_file = None
         self.ole_subfiles = []
         self.filename = filename
+        # Keep in-memory input available to secondary parsers (XLM/XL4).
+        self.file_data = data
         self.container = container
         self.relaxed = relaxed
         self.type = None
@@ -2741,6 +2744,7 @@ class VBA_Parser(object):
         #: Encoding for VBA source code and strings returned by all methods
         self.encoding = encoding
         self.xlm_macros = []
+        self.xlm_analysis = []
         self.no_xlm = False
         #: Output from pcodedmp, disassembly of the VBA P-code
         self.disable_pcode = disable_pcode
@@ -3132,6 +3136,7 @@ class VBA_Parser(object):
         log.info('Opening SLK file %s' % self.filename)
         xlm_macro_found = False
         xlm_macros = []
+        xlm_formulas = []
         xlm_macros.append('Formulas and XLM/Excel 4 macros extracted from SLK file:')
         for line in data.splitlines(False):
             if line.startswith(b'O'):
@@ -3149,10 +3154,17 @@ class VBA_Parser(object):
                 # Cell
                 for s in line.split(b';'):
                     if s.startswith(b'E'):
-                        xlm_macros.append('Formula or Macro: %s' % bytes2str(s[1:]))
+                        formula = bytes2str(s[1:])
+                        xlm_formulas.append(formula)
+                        xlm_macros.append('Formula or Macro: %s' % formula)
         if xlm_macro_found:
             self.contains_xlm_macros = True
             self.xlm_macros = xlm_macros
+            for formula in xlm_formulas:
+                for result in xlm_parser.annotate_formula(formula):
+                    if (result[0], result[1]) not in [
+                            (entry[0], entry[1]) for entry in self.xlm_analysis]:
+                        self.xlm_analysis.append(result)
         self.type = TYPE_SLK
 
 
@@ -3364,8 +3376,10 @@ class VBA_Parser(object):
         if it contains a macro worksheet. Both OLE and OpenXML files are supported.
         Only Excel files may contain XLM macros, and also SLK and CSV files.
 
-        If XLMMacroDeobfuscator is available, it will be used. Otherwise plugin_biff
-        is used as fallback (plugin_biff only supports OLE files, not XLSX or XLSB)
+        The built-in XL4 parser handles BIFF (XLS/XLT), OOXML macro sheets
+        (XLSM/XLTM) and XLSB. If it cannot find a macro sheet and
+        XLMMacroDeobfuscator is installed, it is used as an additional
+        detection/deobfuscation fallback.
 
         :return: bool, True if at least one macro worksheet has been found, False otherwise
         """
@@ -3378,10 +3392,22 @@ class VBA_Parser(object):
             return self.contains_xlm_macros
         # TODO: check also CSV files for formulas?
         self.xlm_macros = []
+        self.xlm_analysis = []
         # check if the file is Excel, otherwise return False
         if not self.ftg.is_excel():
             self.contains_xlm_macros = False
             return False
+        try:
+            parser = xlm_parser.XL4Parser(self.filename, data=self.file_data)
+            if parser.parse():
+                self.xlm_macros = parser.format_lines()
+                self.xlm_analysis = parser.get_analysis()
+                self.contains_xlm_macros = True
+                self.xlm_macrosheet_found = True
+                log.debug('Found XLM macros with built-in XL4 parser')
+                return True
+        except Exception:
+            log.debug('Error when running built-in XL4 parser', exc_info=True)
         if XLMDEOBFUSCATOR:
             # XLMMacroDeobfuscator is available, use it:
             # But it only works with files on disk for now
@@ -3394,7 +3420,6 @@ class VBA_Parser(object):
                     log.error('Error when running XLMMacroDeobfuscator')
         # fall back to plugin_biff:
         if self.ole_file is None:
-            # TODO: handle OpenXML here
             return False
         return self._extract_xlm_plugin_biff()
 
@@ -3678,6 +3703,15 @@ class VBA_Parser(object):
                 description = 'XLM macro found. It may contain malicious code'
                 scanner.suspicious_keywords.append((keyword, description))
                 scanner.results.append(('Suspicious', keyword, description))
+                existing_results = set(
+                    (result_type, result_keyword)
+                    for result_type, result_keyword, _ in scanner.results
+                )
+                for result in self.xlm_analysis:
+                    if (result[0], result[1]) not in existing_results:
+                        scanner.suspicious_keywords.append((result[1], result[2]))
+                        scanner.results.append(result)
+                        existing_results.add((result[0], result[1]))
             # TODO: this has been temporarily disabled
             if self.template_injection_found:
                 log.debug('adding Template Injection to suspicious keywords')

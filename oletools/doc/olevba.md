@@ -8,7 +8,9 @@ VBA keywords** used by malware, anti-sandboxing and anti-virtualization techniqu
 and potential **IOCs** (IP addresses, URLs, executable filenames, etc). 
 It also detects and decodes several common **obfuscation methods including Hex encoding,
 StrReverse, Base64, Dridex, VBA expressions**, and extracts IOCs from decoded strings.
-XLM/Excel 4 Macros are also supported in Excel and SLK files.
+XLM/Excel 4 Macros are also supported in BIFF (XLS/XLT), OpenXML macro
+sheets (XLSM/XLTM), XLSB and SLK files. Dangerous XL4 functions are reported
+in the same analysis table and JSON structure as suspicious VBA keywords.
 
 It can be used either as a command-line tool, or as a python module from your own applications.
 
@@ -34,6 +36,7 @@ S## Main Features
 
 - Detect VBA macros in MS Office 97-2003 and 2007+ files, XML, MHT
 - Extract VBA macro source code
+- Parse Excel 4.0 macro sheets and annotate dangerous XL4 functions
 - Detect auto-executable macros
 - Detect suspicious VBA keywords often used by malware
 - Detect anti-sandboxing and anti-virtualization techniques

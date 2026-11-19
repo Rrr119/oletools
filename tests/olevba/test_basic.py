@@ -129,27 +129,24 @@ class TestOlevbaBasic(unittest.TestCase):
                 result = entry
                 break
             self.assertTrue(result['json_conversion_successful'])
-            if suffix in ('.xlsb', '.xltm', '.xlsm'):
-                # TODO: cannot extract xlm macros for these types yet
-                self.assertEqual(result['macros'], [])
+            self.assertGreaterEqual(len(result['macros']), 1)
+            code = result['macros'][0]['code']
+            if suffix == '.slk':
+                self.assertIn('Excel 4 macros extracted', code)
             else:
-                code = result['macros'][0]['code']
-                if suffix == '.slk':
-                    self.assertIn('Excel 4 macros extracted', code)
-                else:
-                    self.assertIn('Excel 4.0 macro sheet', code)
-                self.assertIn('Auto_Open', code)
-                if 'excel5' not in filename:    # TODO: is not found in excel5
-                    self.assertIn('ALERT(', code)
-                self.assertIn('HALT()', code)
+                self.assertIn('Excel 4.0 macro sheet', code)
+            self.assertIn('Auto_Open', code)
+            if 'excel5' not in filename:    # TODO: is not found in excel5
+                self.assertIn('ALERT(', code)
+            self.assertIn('HALT()', code)
 
-                self.assertIn(len(result['analysis']), (2, 3))
-                types = [entry['type'] for entry in result['analysis']]
-                keywords = [entry['keyword'] for entry in result['analysis']]
-                self.assertIn('Auto_Open', keywords)
-                self.assertIn('XLM macro', keywords)
-                self.assertIn('AutoExec', types)
-                self.assertIn('Suspicious', types)
+            self.assertIn(len(result['analysis']), (2, 3))
+            types = [entry['type'] for entry in result['analysis']]
+            keywords = [entry['keyword'] for entry in result['analysis']]
+            self.assertIn('Auto_Open', keywords)
+            self.assertIn('XLM macro', keywords)
+            self.assertIn('AutoExec', types)
+            self.assertIn('Suspicious', types)
 
     def test_dir_stream_record_project_compat_version(self):
         """Test PROJECTCOMPATVERSION record on dir stream with a ppt file."""

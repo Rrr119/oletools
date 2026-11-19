@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid28715",
+  "B": "/home/dev/feedback/uid28715",
+  "sha": "df463d2a8bf11d79ec3301d1113b9176b8d5d765",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "decalage2",
+    "repo": "oletools",
+    "sha": "df463d2a8bf11d79ec3301d1113b9176b8d5d765"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "oletools",
+    "cloneUrl": "https://github.com/Rrr119/oletools.git"
+  },
+  "at": "2026-11-19T18:24:08.182Z"
+}
