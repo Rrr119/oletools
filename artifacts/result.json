@@ -1,0 +1,18 @@
+{
+  "uid": "36799",
+  "harness": "Codex CLI",
+  "snapshotUrl": "https://github.com/Rrr119/oletools/commit/6aef3b365dbd4743262cf78c50f71c7459c308f9",
+  "harnessVersion": "codex-cli 0.167.2",
+  "operatingSystem": "Ubuntu 26.04.1 LTS",
+  "operatingSystemCell": [
+    "MacOS/Linux"
+  ],
+  "outputDirectory": "/home/dev/feedback/uid36799",
+  "wslDistro": "Ubuntu-26.04",
+  "B": {
+    "success": false,
+    "canceled": true,
+    "error": "任务已取消",
+    "side": "B"
+  }
+}

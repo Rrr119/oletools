@@ -40,6 +40,8 @@ S## Main Features
 - Detect and decodes strings obfuscated with Hex/Base64/StrReverse/Dridex
 - Deobfuscates VBA expressions with any combination of Chr, Asc, Val, StrReverse, Environ, +, &, using a VBA parser built with
 [pyparsing](http://pyparsing.wikispaces.com), including custom Hex and Base64 encodings
+- Detect and restore additional malware obfuscation such as Replace padding, Split/Join, numeric arrays,
+  delimiter-separated character codes and single-byte XOR; annotate dangerous APIs by category and severity
 - Extract IOCs/patterns of interest such as IP addresses, URLs, e-mail addresses and executable file names
 - Scan multiple files and sample collections (wildcards, recursive)
 - Triage mode for a summary view of multiple files
@@ -96,7 +98,9 @@ Options:
   -l LOGLEVEL, --loglevel=LOGLEVEL
                         logging level debug/info/warning/error/critical
                         (default=warning)
-  --deobf               Attempt to deobfuscate VBA expressions (slow)
+  --deobf, --deobfuscate
+                        Attempt to deobfuscate VBA expressions and enable the
+                        unified VBA deobfuscation report (slow for large macros)
   --relaxed             Do not raise errors if opening of substream fails
 
   Output mode (mutually exclusive):
@@ -134,6 +138,10 @@ Scan a single file, showing the macro source code with VBA strings deobfuscated:
 ```text
 olevba file.doc --reveal
 ```
+
+The JSON output includes a `deobfuscation` object (also aliased as
+`vba_deobfuscation`) with restored code, decoded strings, obfuscation
+techniques, risk score and dangerous API annotations.
 
 Scan VBA source code extracted into a text file:
 
@@ -406,6 +414,27 @@ Example:
 ```python
 print vbaparser.reveal()
 ```
+
+### Unified VBA deobfuscation engine
+
+For direct source-code analysis without an Office container, use
+**oletools.vba_deobfuscator.analyze_vba**:
+
+```python
+from oletools.vba_deobfuscator import analyze_vba
+
+result = analyze_vba(vba_source)
+print(result.deobfuscated_code)
+print(result.techniques)
+for api in result.dangerous_apis:
+    print(api.line, api.keyword, api.category, api.severity)
+```
+
+The result is a `str` subclass containing the restored source, so existing code
+that expects a string can use it directly. It also exposes `to_dict()` for JSON
+serialization. `VBA_Parser.deobfuscate_macros()` runs the same engine on all
+modules, and `annotate_dangerous_apis()` returns olevba-compatible
+`(type, keyword, description)` tuples.
 
 ### Close the VBA_Parser
 

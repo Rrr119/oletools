@@ -285,6 +285,7 @@ import email  # for MHTML parsing
 import email.feedparser
 import string  # for printable
 import json   # for json output mode (argument --json)
+import warnings
 
 # import lxml or ElementTree for XML parsing:
 try:
@@ -314,6 +315,18 @@ from pyparsing import \
         Optional, QuotedString,Regex, Suppress, Word, WordStart, \
         alphanums, alphas, hexnums,nums, opAssoc, srange, \
         infixNotation, ParserElement
+
+# pyparsing 3.3 emits deprecation warnings for the camelCase grammar calls
+# below.  Those warnings are not analysis output and break JSON/stdout
+# compatibility, so ignore only warnings emitted by pyparsing itself.
+warnings.filterwarnings(
+    'ignore', category=DeprecationWarning,
+    message=r'(?s).*deprecated.*')
+try:
+    from pyparsing import PyparsingDeprecationWarning
+    warnings.filterwarnings('ignore', category=PyparsingDeprecationWarning)
+except ImportError:
+    pass
 
 # attempt to import XLMMacroDeobfuscator (optional)
 try:
@@ -345,7 +358,16 @@ from oletools import crypto
 from oletools.common.io_encoding import ensure_stdout_handles_unicode
 from oletools.common import codepages
 from oletools import ftguess
+from oletools import vba_deobfuscator
 from oletools.common.log_helper import log_helper
+
+# Public aliases for callers that import the engine through oletools.olevba.
+VBA_Deobfuscator = vba_deobfuscator.VBA_Deobfuscator
+VBADeobfuscator = vba_deobfuscator.VBADeobfuscator
+VBAObfuscationDetector = vba_deobfuscator.VBAObfuscationDetector
+Deobfuscator = vba_deobfuscator.Deobfuscator
+deobfuscate_vba = vba_deobfuscator.deobfuscate_vba
+annotate_dangerous_apis = vba_deobfuscator.annotate_dangerous_apis
 
 # === PYTHON 2+3 SUPPORT ======================================================
 
@@ -917,7 +939,10 @@ re_printable_string = re.compile(b'[\\t\\r\\n\\x20-\\xFF]{5,}')
 
 # Enable PackRat for better performance:
 # (see https://pythonhosted.org/pyparsing/pyparsing.ParserElement-class.html#enablePackrat)
-ParserElement.enablePackrat()
+if hasattr(ParserElement, 'enable_packrat'):
+    ParserElement.enable_packrat()
+else:  # pyparsing < 3.1
+    ParserElement.enablePackrat()
 
 # VBA identifier chars (from MS-VBAL 3.3.5)
 vba_identifier_chars = alphanums + '_'
@@ -2521,6 +2546,7 @@ class VBA_Scanner(object):
         self.code_base64 = ''
         self.code_dridex = ''
         self.code_vba = ''
+        self.code_engine = ''
         self.strReverse = None
         # results = None before scanning, then a list of tuples after scanning
         self.results = None
@@ -2531,6 +2557,12 @@ class VBA_Scanner(object):
         self.base64_strings = None
         self.dridex_strings = None
         self.vba_strings = None
+        #: Unified VBA deobfuscation/dangerous API result, see vba_deobfuscator
+        self.deobfuscation = None
+        self.obfuscation_findings = []
+        self.dangerous_api_findings = []
+        self.obfuscations = self.obfuscation_findings
+        self.dangerous_apis = self.dangerous_api_findings
 
 
     def scan(self, include_decoded_strings=False, deobfuscate=False):
@@ -2575,6 +2607,24 @@ class VBA_Scanner(object):
             self.vba_strings = []
         for encoded, decoded in self.vba_strings:
             self.code_vba += '\n' + decoded
+
+        # Run the unified engine before keyword/IOC scanning so that values
+        # restored by the new decoders also feed the legacy detection rules.
+        try:
+            self.deobfuscation = vba_deobfuscator.analyze_vba(
+                self.code, deep=deobfuscate,
+                existing_vba_strings=self.vba_strings)
+            self.obfuscation_findings = self.deobfuscation.obfuscations
+            self.dangerous_api_findings = self.deobfuscation.dangerous_apis
+            self.obfuscations = self.obfuscation_findings
+            self.dangerous_apis = self.dangerous_api_findings
+            self.code_engine = '\n'.join(
+                item.decoded for item in self.deobfuscation.decoded_strings)
+            self.code_engine += '\n' + self.deobfuscation.expanded_code
+        except Exception as exc:
+            log.debug('VBA deobfuscation engine failed: %s', exc, exc_info=True)
+            self.deobfuscation = None
+
         results = []
         self.autoexec_keywords = []
         self.suspicious_keywords = []
@@ -2588,6 +2638,7 @@ class VBA_Scanner(object):
                 (self.code_base64, 'Base64'),
                 (self.code_dridex, 'Dridex'),
                 (self.code_vba, 'VBA expression'),
+                (self.code_engine, 'Deobfuscated'),
         ):
             self.autoexec_keywords += detect_autoexec(code, obfuscation)
             self.suspicious_keywords += detect_suspicious(code, obfuscation)
@@ -2636,6 +2687,27 @@ class VBA_Scanner(object):
         for encoded, decoded in self.vba_strings:
             if include_decoded_strings or is_printable(decoded):
                 results.append(('VBA string', decoded, encoded))
+
+        # Expose structured obfuscation and dangerous API annotations using
+        # the same three-tuple report shape as legacy olevba results.
+        if self.deobfuscation is not None:
+            existing_result_keys = set((item[0], item[1]) for item in results)
+            for finding in self.obfuscation_findings:
+                result_key = (finding[0], finding[1])
+                if result_key not in existing_result_keys:
+                    results.append((finding[0], finding[1], finding[2]))
+                    existing_result_keys.add(result_key)
+            reported_apis = set()
+            for finding in self.dangerous_api_findings:
+                if finding.keyword in reported_apis:
+                    continue
+                reported_apis.add(finding.keyword)
+                result_key = (finding[0], finding.keyword)
+                if result_key not in existing_result_keys:
+                    results.append((finding[0], finding.keyword,
+                                    finding.description))
+                    existing_result_keys.add(result_key)
+
         self.results = results
         return results
 
@@ -2729,6 +2801,10 @@ class VBA_Parser(object):
         self.modules = None
         # Analysis results: list of tuples (type, keyword, description) - See VBA_Scanner
         self.analysis_results = None
+        #: Unified VBA deobfuscation result from vba_deobfuscator
+        self.deobfuscation = None
+        self.dangerous_apis = []
+        self.obfuscations = []
         # statistics for the scan summary and flags
         self.nb_macros = 0
         self.nb_autoexec = 0
@@ -3665,6 +3741,10 @@ class VBA_Parser(object):
             # Analyze the whole code at once:
             scanner = VBA_Scanner(self.vba_code_all_modules)
             self.analysis_results = scanner.scan(show_decoded_strings, deobfuscate)
+            self.deobfuscation = getattr(scanner, 'deobfuscation', None)
+            if self.deobfuscation is not None:
+                self.dangerous_apis = self.deobfuscation.dangerous_apis
+                self.obfuscations = self.deobfuscation.obfuscations
             if self.detect_vba_stomping():
                 log.debug('adding VBA stomping to suspicious keywords')
                 keyword = 'VBA Stomping'
@@ -3720,10 +3800,55 @@ class VBA_Parser(object):
                 if encoded.startswith('(') and encoded.endswith(')'):
                     decoded = '(%s)' % decoded
                 deobf_code = deobf_code.replace(encoded, decoded)
+        try:
+            engine_result = vba_deobfuscator.analyze_vba(
+                deobf_code, deep=True, propagate_variables=True)
+            if engine_result.deobfuscated_code:
+                deobf_code = engine_result.expanded_code
+        except Exception as exc:
+            log.debug('Unified VBA deobfuscation engine failed in reveal: %s',
+                      exc, exc_info=True)
         # # TODO: there is a bug somewhere which creates double returns '\r\r'
         # deobf_code = deobf_code.replace('\r\r', '\r')
         return deobf_code
         #TODO: repasser l'analyse plusieurs fois si des chaines hex ou base64 sont revelees
+
+    def deobfuscate_macros(self, deep=True, propagate_variables=True):
+        """
+        Run the unified VBA deobfuscation engine on all extracted modules.
+
+        The returned object is a string containing restored source code and
+        also exposes ``decoded_strings``, ``obfuscations`` and
+        ``dangerous_apis``.
+        """
+        if self.vba_code_all_modules is None:
+            self.vba_code_all_modules = self.get_vba_code_all_modules()
+        code = self.vba_code_all_modules or ''
+        self.deobfuscation = vba_deobfuscator.analyze_vba(
+            code, deep=deep, propagate_variables=propagate_variables)
+        self.dangerous_apis = self.deobfuscation.dangerous_apis
+        self.obfuscations = self.deobfuscation.obfuscations
+        return self.deobfuscation
+
+    #: Concise alias used by library integrations.
+    deobfuscate = deobfuscate_macros
+
+    def get_deobfuscated_code(self, expanded=True):
+        """Return restored code, optionally with constant variables expanded."""
+        result = self.deobfuscate_macros()
+        return result.expanded_code if expanded else result.deobfuscated_code
+
+    def detect_obfuscation(self):
+        """Return obfuscation findings from the unified engine."""
+        if self.deobfuscation is None:
+            self.deobfuscate_macros(deep=False)
+        return self.deobfuscation.obfuscations
+
+    def annotate_dangerous_apis(self):
+        """Return dangerous API findings from the unified engine."""
+        if self.deobfuscation is None:
+            self.deobfuscate_macros(deep=False)
+        return self.deobfuscation.dangerous_apis
 
 
     def find_vba_forms(self):
@@ -4061,11 +4186,13 @@ class VBA_Parser_CLI(VBA_Parser):
         """
         results = self.analysis_results
         if results:
-            t = tablestream.TableStream(column_width=(10, 20, 45),
+            t = tablestream.TableStream(column_width=(14, 22, 48),
                                         header_row=('Type', 'Keyword', 'Description'))
             COLOR_TYPE = {
                 'AutoExec': 'yellow',
                 'Suspicious': 'red',
+                'DangerousAPI': 'red',
+                'Obfuscation': 'yellow',
                 'IOC': 'cyan',
             }
             for kw_type, keyword, description in results:
@@ -4077,6 +4204,22 @@ class VBA_Parser_CLI(VBA_Parser):
                 color_type = COLOR_TYPE.get(kw_type, None)
                 t.write_row((kw_type, keyword, description), colors=(color_type, None, None))
             t.close()
+            deobfuscation = getattr(self, 'deobfuscation', None)
+            if deobfuscation is not None and deobfuscation.dangerous_apis:
+                print('')
+                print('Dangerous API annotations:')
+                printed_api_keys = set()
+                for api in deobfuscation.dangerous_apis:
+                    detail_key = (api.line, api.keyword, api.evidence)
+                    if detail_key in printed_api_keys:
+                        continue
+                    printed_api_keys.add(detail_key)
+                    location = 'line %s' % api.line if api.line else 'unknown line'
+                    print('  [{severity}] {category} {api} ({location}): {description}'.format(
+                        severity=getattr(api, 'severity', 'unknown').upper(),
+                        category=getattr(api, 'category', 'unknown'),
+                        api=api.keyword, location=location,
+                        description=api.description))
             if self.vba_stomping_detected:
                 print('VBA Stomping detection is experimental: please report any false positive/negative at https://github.com/decalage2/oletools/issues')
         else:
@@ -4110,6 +4253,8 @@ class VBA_Parser_CLI(VBA_Parser):
             COLOR_TYPE = {
                 'AutoExec': 'yellow',
                 'Suspicious': 'red',
+                'DangerousAPI': 'red',
+                'Obfuscation': 'yellow',
                 'IOC': 'cyan',
             }
             for kw_type, keyword, description in results:
@@ -4284,6 +4429,10 @@ class VBA_Parser_CLI(VBA_Parser):
         result['code_deobfuscated'] = None
         result['do_deobfuscate'] = deobfuscate
         result['show_pcode'] = show_pcode
+        result['deobfuscation'] = None
+        result['vba_deobfuscation'] = None
+        result['obfuscations'] = []
+        result['dangerous_apis'] = []
 
         try:
             #TODO: handle olefile errors, when an OLE file is malformed
@@ -4314,6 +4463,24 @@ class VBA_Parser_CLI(VBA_Parser):
                     result['code_deobfuscated'] = self.reveal()
                 if show_pcode:
                     result['pcode'] = self.extract_pcode()
+                try:
+                    if self.deobfuscation is not None:
+                        deobfuscation = self.deobfuscation
+                    else:
+                        deobfuscation = self.deobfuscate_macros(
+                            deep=deobfuscate, propagate_variables=True)
+                    deobfuscation_report = deobfuscation.to_dict()
+                    result['deobfuscation'] = deobfuscation_report
+                    result['vba_deobfuscation'] = deobfuscation_report
+                    result['obfuscations'] = [
+                        item.to_dict() for item in deobfuscation.obfuscations]
+                    result['dangerous_apis'] = [
+                        item.to_dict() for item in deobfuscation.dangerous_apis]
+                    if deobfuscate and not show_deobfuscated_code:
+                        result['code_deobfuscated'] = deobfuscation.expanded_code
+                except Exception as exc:
+                    log.debug('Could not build VBA deobfuscation report: %s',
+                              exc, exc_info=True)
             result['macros'] = macros
             result['json_conversion_successful'] = True
         except Exception as exc:
@@ -4433,7 +4600,8 @@ def parse_args(cmd_line_args=None):
                         default=DEFAULT_LOG_LEVEL,
                         help='logging level debug/info/warning/error/critical '
                              '(default=%(default)s)')
-    parser.add_argument('--deobf', dest="deobfuscate", action="store_true",
+    parser.add_argument('--deobf', '--deobfuscate', dest="deobfuscate",
+                        action="store_true",
                         default=False,
                         help="Attempt to deobfuscate VBA expressions (slow)")
     # TODO: --relaxed is enabled temporarily until a solution to issue #593 is found
